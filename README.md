@@ -20,6 +20,8 @@
 
 与原始 MeloTTS 不同，本项目不再使用 `speaker_id`，而是通过提取任意一段参考音频的声纹（Speaker Embedding）来控制生成语音的音色和风格。
 
+**[English Version](./README_en.md)** 
+
 # ✨ 主要特性
 
 *   **高质量语音合成**：所有模型均在 44.1kHz 采样率下训练，提供清晰、自然的听感，以追求更高的音质。
