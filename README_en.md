@@ -14,8 +14,9 @@
     <img alt="Python" src="https://img.shields.io/badge/Python-3.9+-blue.svg">
   </a>
 </p>
-- ## MeloVC
-  **MeloVC** is a text-to-speech (TTS) project modified from [MeloTTS](https://github.com/myshell-ai/MeloTTS) , focusing on high-quality **bilingual (Chinese-English) **speech synthesis. It implements zero-shot voice cloning through **Speaker Embedding** technology.
+
+## MeloVC
+  **MeloVC** is a text-to-speech (TTS) project modified from [MeloTTS](https://github.com/myshell-ai/MeloTTS) , focusing on high-quality bilingual **(Chinese-English)** speech synthesis. It implements zero-shot voice cloning through **Speaker Embedding** technology.
   Unlike the original MeloTTS, this project no longer uses `speaker_id`. Instead, it controls the timbre and style of the generated speech by extracting a speaker embedding (voiceprint) from any given reference audio clip.
 
   ## ✨ Key Features
