@@ -1,5 +1,6 @@
 txtsplit
 torch
+pyworld
 torchaudio
 cached_path
 transformers==4.27.4

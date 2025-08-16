@@ -125,10 +125,13 @@ def run():
         len(symbols),
         hps.data.filter_length // 2 + 1,
         hps.train.segment_size // hps.data.hop_length,
+        num_tones=hps.num_tones,
+        num_languages=hps.num_languages,
         mas_noise_scale_initial=mas_noise_scale_initial,
         noise_scale_delta=noise_scale_delta,
         use_vc=True,
         hps=hps,
+        sample_rate=hps.data.sampling_rate,
         **hps.model,
     ).cuda(rank)
 
@@ -158,7 +161,7 @@ def run():
     net_g = DDP(net_g, device_ids=[rank], find_unused_parameters=True)
     net_d = DDP(net_d, device_ids=[rank], find_unused_parameters=True)
     
-    pretrain_G, pretrain_D, pretrain_dur = load_pretrain_model()
+    pretrain_G, pretrain_D, pretrain_dur = load_pretrain_model(device="cuda", ckpt_path="pretrained_melovc_models")
     hps.pretrain_G = hps.pretrain_G or pretrain_G
     hps.pretrain_D = hps.pretrain_D or pretrain_D
     hps.pretrain_dur = hps.pretrain_dur or pretrain_dur
@@ -302,6 +305,8 @@ def train_and_evaluate(
         text_lengths,
         spec_padded,
         spec_lengths,
+        f0_padded,
+        f0_lengths,
         wav_padded,
         wav_lengths,
         tone_padded,
@@ -318,9 +323,8 @@ def train_and_evaluate(
         x, x_lengths = text_padded.cuda(rank, non_blocking=True), text_lengths.cuda(
             rank, non_blocking=True
         )
-        spec, spec_lengths = spec_padded.cuda(rank, non_blocking=True), spec_lengths.cuda(
-            rank, non_blocking=True
-        )
+        spec, spec_lengths = spec_padded.cuda(rank, non_blocking=True), spec_lengths.cuda(rank, non_blocking=True)
+        f0, f0_lengths = f0_padded.cuda(rank, non_blocking=True), f0_lengths.cuda(rank, non_blocking=True)
         y, y_lengths = wav_padded.cuda(rank, non_blocking=True), wav_lengths.cuda(
             rank, non_blocking=True
         )
@@ -330,11 +334,13 @@ def train_and_evaluate(
 
         speaker_embed_padded = speaker_embed_padded.cuda(rank, non_blocking=True)
         bert = bert.cuda(rank, non_blocking=True)
-
+   
         with autocast(enabled=hps.train.fp16_run):
             (
                 y_hat,
                 l_length,
+                f0_pred_phone,
+                f0_gt_phone,
                 attn,
                 ids_slice,
                 x_mask,
@@ -346,11 +352,14 @@ def train_and_evaluate(
                 x_lengths,
                 spec,
                 spec_lengths,
+                f0,
+                f0_lengths,
                 tone,
                 language,
                 speaker_embed_padded,
                 bert
             )
+
             mel = spec_to_mel_torch(
                 spec,
                 hps.data.filter_length,
@@ -420,7 +429,11 @@ def train_and_evaluate(
 
                 loss_fm = feature_loss(fmap_r, fmap_g)
                 loss_gen, losses_gen = generator_loss(y_d_hat_g)
-                loss_gen_all = loss_gen + loss_fm + loss_mel + loss_dur + loss_kl
+
+                # 只在有声部分 (voiced, F0 > 0) 计算 F0 损失
+                voiced_mask = (f0_gt_phone > 1e-6)
+                loss_f0 = F.mse_loss(f0_pred_phone[voiced_mask], torch.log(f0_gt_phone[voiced_mask] + 1e-6))
+                loss_gen_all = loss_gen + loss_fm + loss_mel + loss_dur + loss_kl + 0.5 * loss_f0
                 if net_dur_disc is not None:
                     loss_dur_gen, losses_dur_gen = generator_loss(y_dur_hat_g)
                     loss_gen_all += loss_dur_gen
@@ -430,11 +443,10 @@ def train_and_evaluate(
         grad_norm_g = torch.nn.utils.clip_grad_norm_(net_g.parameters(), hps.train.grad_clip_thresh)
         scaler.step(optim_g)
         scaler.update()
-
         if rank == 0:
             if global_step % hps.train.log_interval == 0:
                 lr = optim_g.param_groups[0]["lr"]
-                losses = [loss_disc, loss_gen, loss_fm, loss_mel, loss_dur, loss_kl]
+                losses = [loss_disc, loss_gen, loss_fm, loss_mel, loss_dur, loss_kl, loss_f0]
                 logger.info(
                     "Train Epoch: {} [{:.0f}%]".format(
                         epoch, 100.0 * batch_idx / len(train_loader)
@@ -455,6 +467,7 @@ def train_and_evaluate(
                         "loss/g/mel": loss_mel,
                         "loss/g/dur": loss_dur,
                         "loss/g/kl": loss_kl,
+                        "loss/g/f0": loss_f0,
                     }
                 )
                 scalar_dict.update(
@@ -542,6 +555,8 @@ def evaluate(hps, generator, eval_loader, writer_eval):
             text_lengths,
             spec_padded,
             spec_lengths,
+            f0_padded,
+            f0_lengths,
             wav_padded,
             wav_lengths,
             tone_padded,
@@ -551,6 +566,7 @@ def evaluate(hps, generator, eval_loader, writer_eval):
         ) in enumerate(eval_loader):
             x, x_lengths = text_padded.cuda(), text_lengths.cuda()
             spec, spec_lengths = spec_padded.cuda(), spec_lengths.cuda()
+            f0, f0_lengths = f0_padded.cuda(), f0_lengths.cuda()
             y, y_lengths = wav_padded.cuda(), wav_lengths.cuda()
 
             bert = bert.cuda()
@@ -562,6 +578,7 @@ def evaluate(hps, generator, eval_loader, writer_eval):
                 y_hat, attn, mask, *_ = generator.module.infer(
                     x,
                     x_lengths,
+                    f0,
                     tone,
                     language,
                     speaker_embed,
@@ -571,6 +588,7 @@ def evaluate(hps, generator, eval_loader, writer_eval):
                     sdp_ratio=0.0 if not use_sdp else 1.0,
                 )
                 y_hat_lengths = mask.sum([1, 2]).long() * hps.data.hop_length
+                
 
                 mel = spec_to_mel_torch(
                     spec,
@@ -590,6 +608,7 @@ def evaluate(hps, generator, eval_loader, writer_eval):
                     hps.data.mel_fmin,
                     hps.data.mel_fmax,
                 )
+                
                 image_dict.update(
                     {
                         f"gen/mel_{batch_idx}": utils.plot_spectrogram_to_numpy(
@@ -612,7 +631,7 @@ def evaluate(hps, generator, eval_loader, writer_eval):
                     }
                 )
                 audio_dict.update({f"gt/audio_{batch_idx}": y[0, :, : y_lengths[0]]})
-
+    
     utils.summarize(
         writer=writer_eval,
         global_step=global_step,

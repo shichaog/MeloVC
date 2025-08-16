@@ -22,6 +22,13 @@
 
 **[English Version](./README_en.md)** 
 
+
+
+## [v2] - 2025-08-15
+### 增加
+- **基频包络控制** 增加了harvest基频提取方法
+- HiFi-GAN升级成了**NSF-HIFIGAN**
+- 预训练的模型V2开源到了 [HuggingFace](https://huggingface.co/shichaog/MeloVC/)。
 # ✨ 主要特性
 
 *   **高质量语音合成**：所有模型均在 44.1kHz 采样率下训练，提供清晰、自然的听感，以追求更高的音质。

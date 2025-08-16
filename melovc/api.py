@@ -83,6 +83,7 @@ class TTS(nn.Module):
             num_languages=num_languages,
             use_vc=True,
             hps=hps,
+            sample_rate = hps.data.sampling_rate,
             **hps.model,
         ).to(device)
 
@@ -177,10 +178,11 @@ class TTS(nn.Module):
                 audio = self.model.infer(
                         x_tst,
                         x_tst_lengths,
-                        tones,
-                        lang_ids,
-                        speaker_embed,
-                        bert,
+                        f0_external=None,
+                        tone=tones,
+                        language=lang_ids,
+                        speaker_embed=speaker_embed,
+                        bert=bert,
                         sdp_ratio=sdp_ratio,
                         noise_scale=noise_scale,
                         noise_scale_w=noise_scale_w,

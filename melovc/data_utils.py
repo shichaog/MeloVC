@@ -10,6 +10,7 @@ from utils import load_filepaths_and_text
 from utils import load_wav_to_torch_librosa as load_wav_to_torch
 from text import cleaned_text_to_sequence, get_bert
 import numpy as np
+from harvest_f0 import HarvestF0Predictor
 
 """Multi speaker version"""
 
@@ -38,6 +39,7 @@ class TextAudioLoader(torch.utils.data.Dataset):
         if self.use_mel_spec_posterior:
             self.n_mel_channels = getattr(hparams, "n_mel_channels", 80)
 
+        self.f0_predictor = HarvestF0Predictor(hop_length=self.hop_length, sampling_rate=self.sampling_rate)
         self.cleaned_text = getattr(hparams, "cleaned_text", False)
 
         self.add_blank = hparams.add_blank
@@ -46,8 +48,8 @@ class TextAudioLoader(torch.utils.data.Dataset):
 
         random.seed(1234)
         random.shuffle(self.audiopaths_and_text)
-        self._filter()
 
+        self._filter()
 
     def _filter(self):
         """
@@ -62,7 +64,7 @@ class TextAudioLoader(torch.utils.data.Dataset):
         skipped = 0
         logger.info("Init dataset...")
         for item in tqdm(
-            self.audiopaths_and_text
+                self.audiopaths_and_text
         ):
             try:
                 _id, language, text, embedding, phones, tone, word2ph = item
@@ -81,7 +83,7 @@ class TextAudioLoader(torch.utils.data.Dataset):
                 lengths.append(os.path.getsize(audiopath) // (2 * self.hop_length))
             else:
                 skipped += 1
-        logger.info(f'min: {min(lengths)}; max: {max(lengths)}' )
+        logger.info(f'min: {min(lengths)}; max: {max(lengths)}')
         logger.info(
             "skipped: "
             + str(skipped)
@@ -98,30 +100,30 @@ class TextAudioLoader(torch.utils.data.Dataset):
         bert, phones, tone, language = self.get_text(
             text, word2ph, phones, tone, language, audiopath
         )
-
-        spec, wav = self.get_audio(audiopath)
+        spec, f0, wav = self.get_audio(audiopath)
 
         embedding = torch.FloatTensor(embedding)
 
-        return (phones, spec, wav, tone, language, embedding, bert)
+        return (phones, spec, f0, wav, tone, language, embedding, bert)
 
     def get_audio(self, filename):
-        audio_norm, sampling_rate = load_wav_to_torch(filename, self.sampling_rate)
+        spec_filename = filename.replace(".wav", ".spec.pt")
+        f0_filename = filename.replace(".wav", ".f0.pt")
+        if self.use_mel_spec_posterior:
+            spec_filename = spec_filename.replace(".spec.pt", ".mel.pt")
+
+        # 如果成功加载spec，也需要加载对应的音频文件
+        audio_norm_org, sampling_rate = load_wav_to_torch(filename, self.sampling_rate)
         if sampling_rate != self.sampling_rate:
             raise ValueError(
                 "{} {} SR doesn't match target {} SR".format(
-                    filename, sampling_rate, self.sampling_rate
+                        filename, sampling_rate, self.sampling_rate
                 )
             )
-        # NOTE: normalize has been achieved by torchaudio
-        # audio_norm = audio / self.max_wav_value
-        audio_norm = audio_norm.unsqueeze(0)
-        spec_filename = filename.replace(".wav", ".spec.pt")
-        if self.use_mel_spec_posterior:
-            spec_filename = spec_filename.replace(".spec.pt", ".mel.pt")
+        audio_norm = audio_norm_org.unsqueeze(0)
+
         try:
             spec = torch.load(spec_filename)
-            assert False
         except:
             if self.use_mel_spec_posterior:
                 spec = mel_spectrogram_torch(
@@ -146,7 +148,30 @@ class TextAudioLoader(torch.utils.data.Dataset):
                 )
             spec = torch.squeeze(spec, 0)
             torch.save(spec, spec_filename)
-        return spec, audio_norm
+
+        try:
+            f0 = torch.load(f0_filename)
+        except:
+            # NOTE: normalize has been achieved by torchaudio
+            # audio_norm = audio / self.max_wav_value
+            f0 = self.f0_predictor.compute_f0(audio_norm_org)
+
+            # --- 关键检查 ---
+            # 如果 f0 计算结果为空，就抛出异常，让 __getitem__ 捕获
+            if f0 is None or f0.size == 0:
+                raise ValueError(f"F0 calculation failed for {filename}")
+            if f0.shape[0] > spec.shape[1]:
+                f0 = f0[:spec.shape[1]]
+            else:
+                f0 = np.pad(f0, (0, spec.shape[1] - f0.shape[0]))
+
+            f0 = torch.from_numpy(f0)  # 在这里将 numpy array 转换回 tensor
+            f0 = f0.unsqueeze(0)  # 现在 f0 的形状变成了 [1, 149]
+            torch.save(f0, f0_filename)
+            
+        if f0.shape[1] != spec.shape[1]:
+            raise ValueError("f0 shape not match spec shape")
+        return spec, f0, audio_norm
 
     def get_text(self, text, word2ph, phone, tone, language_str, wav_path):
         phone, tone, language = cleaned_text_to_sequence(phone, tone, language_str)
@@ -184,7 +209,17 @@ class TextAudioLoader(torch.utils.data.Dataset):
         return bert, phone, tone, language
 
     def __getitem__(self, index):
-        return self.get_audio_text_pair(self.audiopaths_and_text[index])
+        try:
+            # 尝试正常获取数据
+            return self.get_audio_text_pair(self.audiopaths_and_text[index])
+        except Exception as e:
+            # 如果发生任何异常（比如F0计算失败，文件读取失败等）
+            # 打印一个警告信息，方便调试
+            print(f"Skipping index {index} due to error: {e}")
+            # 随机选择另一个样本来代替，避免数据分布偏差
+            # 同时避免无限递归（如果所有数据都有问题）
+            new_index = random.randint(0, len(self.audiopaths_and_text) - 1)
+            return self.__getitem__(new_index)
 
     def __len__(self):
         return len(self.audiopaths_and_text)
@@ -203,22 +238,24 @@ class TextAudioCollate:
         batch: [text_normalized, spec_normalized, wav_normalized, sid]
         """
         # Right zero-pad all one-hot text sequences to max input length
-        # (phones, spec, wav, tone, language, embedding, bert)
+        # (phones, spec, f0, wav, tone, language, embedding, bert)
         _, ids_sorted_decreasing = torch.sort(
             torch.LongTensor([x[1].size(1) for x in batch]), dim=0, descending=True
         )
-
         # (phones, spec, wav, tone, language, embedding, bert)
         max_text_len = max([len(x[0]) for x in batch])
         max_spec_len = max([x[1].size(1) for x in batch])
-        max_wav_len = max([x[2].size(1) for x in batch])
+        max_f0_len = max([x[2].size(1) for x in batch])
+        max_wav_len = max([x[3].size(1) for x in batch])
 
         text_lengths = torch.LongTensor(len(batch))
         spec_lengths = torch.LongTensor(len(batch))
+        f0_lengths = torch.LongTensor(len(batch))
         wav_lengths = torch.LongTensor(len(batch))
 
         text_padded = torch.LongTensor(len(batch), max_text_len)
         spec_padded = torch.FloatTensor(len(batch), batch[0][1].size(0), max_spec_len)
+        f0_padded = torch.FloatTensor(len(batch), 1, max_f0_len)
         wav_padded = torch.FloatTensor(len(batch), 1, max_wav_len)
 
         tone_padded = torch.LongTensor(len(batch), max_text_len)
@@ -232,34 +269,39 @@ class TextAudioCollate:
         language_padded.zero_()
         speaker_embed_padded.zero_()
         spec_padded.zero_()
+        f0_padded.zero_()
         wav_padded.zero_()
         bert_padded.zero_()
-        #(phones, spec, wav, tone, language, embedding, bert)
+        # (phones, spec, wav, tone, language, embedding, bert)
         for i in range(len(ids_sorted_decreasing)):
             row = batch[ids_sorted_decreasing[i]]
 
             text = row[0]
             text_padded[i, : text.size(0)] = text
             text_lengths[i] = text.size(0)
-
+    
             spec = row[1]
             spec_padded[i, :, : spec.size(1)] = spec
             spec_lengths[i] = spec.size(1)
 
-            wav = row[2]
+            f0 = row[2]
+            f0_padded[i, :, : f0.size(1)] = f0
+            f0_lengths[i] = f0.size(1)
+
+            wav = row[3]
             wav_padded[i, :, : wav.size(1)] = wav
             wav_lengths[i] = wav.size(1)
 
-            tone = row[3]
+            tone = row[4]
             tone_padded[i, : tone.size(0)] = tone
 
-            language = row[4]
+            language = row[5]
             language_padded[i, : language.size(0)] = language
 
-            speaker_embed = row[5]
+            speaker_embed = row[6]
             speaker_embed_padded[i, : speaker_embed.size(0)] = speaker_embed
 
-            bert = row[6]
+            bert = row[7]
             bert_padded[i, :, : bert.size(1)] = bert
 
         return (
@@ -267,6 +309,8 @@ class TextAudioCollate:
             text_lengths,
             spec_padded,
             spec_lengths,
+            f0_padded,
+            f0_lengths,
             wav_padded,
             wav_lengths,
             tone_padded,
@@ -287,13 +331,13 @@ class DistributedBucketSampler(torch.utils.data.distributed.DistributedSampler):
     """
 
     def __init__(
-        self,
-        dataset,
-        batch_size,
-        boundaries,
-        num_replicas=None,
-        rank=None,
-        shuffle=True,
+            self,
+            dataset,
+            batch_size,
+            boundaries,
+            num_replicas=None,
+            rank=None,
+            shuffle=True,
     ):
         super().__init__(dataset, num_replicas=num_replicas, rank=rank, shuffle=shuffle)
         self.lengths = dataset.lengths
@@ -332,8 +376,8 @@ class DistributedBucketSampler(torch.utils.data.distributed.DistributedSampler):
             len_bucket = len(buckets[i])
             total_batch_size = self.num_replicas * self.batch_size
             rem = (
-                total_batch_size - (len_bucket % total_batch_size)
-            ) % total_batch_size
+                          total_batch_size - (len_bucket % total_batch_size)
+                  ) % total_batch_size
             num_samples_per_bucket.append(len_bucket + rem)
         return buckets, num_samples_per_bucket
 
@@ -362,21 +406,21 @@ class DistributedBucketSampler(torch.utils.data.distributed.DistributedSampler):
             # add extra samples to make it evenly divisible
             rem = num_samples_bucket - len_bucket
             ids_bucket = (
-                ids_bucket
-                + ids_bucket * (rem // len_bucket)
-                + ids_bucket[: (rem % len_bucket)]
+                    ids_bucket
+                    + ids_bucket * (rem // len_bucket)
+                    + ids_bucket[: (rem % len_bucket)]
             )
 
             # subsample
-            ids_bucket = ids_bucket[self.rank :: self.num_replicas]
+            ids_bucket = ids_bucket[self.rank:: self.num_replicas]
 
             # batching
             for j in range(len(ids_bucket) // self.batch_size):
                 batch = [
                     bucket[idx]
                     for idx in ids_bucket[
-                        j * self.batch_size : (j + 1) * self.batch_size
-                    ]
+                               j * self.batch_size: (j + 1) * self.batch_size
+                               ]
                 ]
                 batches.append(batch)
 

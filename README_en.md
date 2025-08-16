@@ -19,6 +19,12 @@
   **MeloVC** is a text-to-speech (TTS) project modified from [MeloTTS](https://github.com/myshell-ai/MeloTTS) , focusing on high-quality bilingual **(Chinese-English)** speech synthesis. It implements zero-shot voice cloning through **Speaker Embedding** technology.
   Unlike the original MeloTTS, this project no longer uses `speaker_id`. Instead, it controls the timbre and style of the generated speech by extracting a speaker embedding (voiceprint) from any given reference audio clip.
 
+### [v2] - 2025-08-15
+#### Added
+- Fundamental Frequency (F0) Control: Added the Harvest algorithm for more robust F0 extraction.
+- Upgraded Vocoder: The HiFi-GAN vocoder has been upgraded to NSF-HIFIGAN for higher-quality audio synthesis.
+- Pre-trained Model Release: The V2 pre-trained model is now open-sourced on HuggingFace.
+
   ## ✨ Key Features
   - **High-Quality Speech Synthesis:** All models are trained at a 44.1kHz sampling rate, delivering a clear, natural auditory experience with superior audio quality.
   - **Focused Language Support:** This project specializes in Chinese and English, removing support for other languages to simplify the model architecture.
@@ -96,7 +102,7 @@
   This will create a `logs` directory in the current path, containing training logs and model checkpoints. You can use TensorBoard to monitor the training progress. During the process, the script will download necessary model files from [HuggingFace](https://huggingface.co/shichaog/MeloVC/).
   ## Author
   - [shichaog](https://github.com/shichaog/) 
-  If you find this project useful, please consider contributing to its future development.
+    If you find this project useful, please consider contributing to its future development.
   ## 📜 License
   This project is licensed under the Apache 2.0 License.
   ## 🙏 Acknowledgements
