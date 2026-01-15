@@ -46,6 +46,35 @@ torch.backends.cuda.enable_flash_sdp(True)
 torch.backends.cuda.enable_math_sdp(True)
 global_step = 0
 
+
+def print_model_stats(model):
+    """
+    打印模型参数统计和结构信息 (使用 print 直接输出到终端/日志)
+    """
+    try:
+        # 1. 计算总参数量
+        total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+        # 2. 计算 TextEncoder 参数量 (假设变量名为 enc_p)
+        # 如果模型被 DDP 包裹了，可能需要用 model.module.enc_p，但我们在 DDP 之前调用，所以直接用 model.enc_p
+        enc_params = sum(p.numel() for p in model.enc_p.parameters() if p.requires_grad)
+
+        print("\n" + "=" * 50)
+        print(f" [Model Stats] Structure Statistics")
+        print("=" * 50)
+        print(f" Total Trainable Parameters: {total_params / 1e6:.2f} M")
+        print(f" TextEncoder Parameters:     {enc_params / 1e6:.2f} M")
+        print(f" TextEncoder Ratio:          {enc_params / total_params * 100:.2f}%")
+        print("-" * 50)
+
+        # 3. 打印 TextEncoder 的具体层结构
+        print(" TextEncoder Layer Structure:")
+        print(model.enc_p)
+        print("=" * 50 + "\n")
+
+    except Exception as e:
+        print(f"Error printing model stats: {e}")
+
 def run():
     hps = utils.get_hparams()
     local_rank = int(os.environ["LOCAL_RANK"])
@@ -134,6 +163,9 @@ def run():
         sample_rate=hps.data.sampling_rate,
         **hps.model,
     ).cuda(rank)
+
+    if rank == 0:
+        print_model_stats(net_g)
 
     net_d = MultiPeriodDiscriminator(hps.model.use_spectral_norm).cuda(rank)
     optim_g = torch.optim.AdamW(

@@ -16,6 +16,52 @@ from melovc import utils
 from melovc.commons import init_weights, get_padding
 import melovc.monotonic_align as monotonic_align
 
+try:
+    from mamba_ssm import Mamba
+except ImportError:
+    Mamba = None
+
+
+class BiMambaBlock(nn.Module):
+    def __init__(self, channels, d_state=16, d_conv=4, expand=2, dropout=0.0):
+        super().__init__()
+        if Mamba is None:
+            raise ImportError("Please install mamba-ssm")
+
+        # Mamba 内部是 [B, T, C]，这里 channels 对应 d_model
+        self.mamba_fwd = Mamba(d_model=channels, d_state=d_state, d_conv=d_conv, expand=expand)
+        self.mamba_bwd = Mamba(d_model=channels, d_state=d_state, d_conv=d_conv, expand=expand)
+
+        self.linear_fuse = nn.Linear(channels * 2, channels)
+        self.norm = nn.LayerNorm(channels)
+        self.dropout = nn.Dropout(dropout)
+
+    def forward(self, x, x_mask=None):
+        # 输入 x: [B, C, T]
+        # 转置为 Mamba 需要的 [B, T, C]
+        x_in = x.transpose(1, 2)
+
+        # 双向处理
+        out_fwd = self.mamba_fwd(x_in)
+        out_bwd = torch.flip(self.mamba_bwd(torch.flip(x_in, [1])), [1])
+
+        # 融合
+        out = torch.cat([out_fwd, out_bwd], dim=-1)
+        out = self.linear_fuse(out)
+
+        # 残差 + Norm
+        out = self.norm(out + x_in)
+        out = self.dropout(out)
+
+        # 转回 [B, C, T]
+        out = out.transpose(1, 2)
+
+        # 如果提供了 Mask，则应用 Mask
+        if x_mask is not None:
+            out = out * x_mask
+
+        return out
+
 
 class DurationDiscriminator(nn.Module):  # vits2
     def __init__(
@@ -374,6 +420,7 @@ class TextEncoder(nn.Module):
         gin_channels=0,
         num_languages=None,
         num_tones=None,
+        use_mamba=False
     ):
         super().__init__()
         if num_languages is None:
@@ -389,6 +436,7 @@ class TextEncoder(nn.Module):
         self.kernel_size = kernel_size
         self.p_dropout = p_dropout
         self.gin_channels = gin_channels
+        self.use_mamba = use_mamba
         self.emb = nn.Embedding(n_vocab, hidden_channels)
         nn.init.normal_(self.emb.weight, 0.0, hidden_channels**-0.5)
         self.tone_emb = nn.Embedding(num_tones, hidden_channels)
@@ -397,16 +445,28 @@ class TextEncoder(nn.Module):
         nn.init.normal_(self.language_emb.weight, 0.0, hidden_channels**-0.5)
         self.bert_proj = nn.Conv1d(1024, hidden_channels, 1)
 
-        # IMPORTANT: Initialize the encoder WITHOUT gin_channels, as we will use FiLM instead
-        self.encoder = attentions.Encoder(
-            hidden_channels,
-            filter_channels,
-            n_heads,
-            n_layers,
-            kernel_size,
-            p_dropout,
-            gin_channels=0,
-        )
+        if self.use_mamba:
+            print(f"INFO: Initializing TextEncoder with Bi-Mamba (Layers: {n_layers})")
+            # Mamba 不需要 gin_channels 传进去，因为你在最后面用了 FiLM
+            self.mamba_layers = nn.ModuleList([
+                BiMambaBlock(
+                    channels=hidden_channels,
+                    dropout=p_dropout
+                ) for _ in range(n_layers)
+            ])
+        else:
+            print("INFO: Initializing TextEncoder with Original Attention")
+            # IMPORTANT: Initialize the encoder WITHOUT gin_channels, as we will use FiLM instead
+            self.encoder = attentions.Encoder(
+                hidden_channels,
+                filter_channels,
+                n_heads,
+                n_layers,
+                kernel_size,
+                p_dropout,
+                gin_channels=0,
+            )
+
         self.proj = nn.Conv1d(hidden_channels, out_channels * 2, 1)
 
         # 在TextEncoder的末尾添加FiLM层
@@ -436,7 +496,15 @@ class TextEncoder(nn.Module):
             x.dtype
         )
 
-        x = self.encoder(x * x_mask, x_mask, g=None)
+        # [NEW] Forward 逻辑分流
+        if self.use_mamba:
+            # Mamba 分支：手动循环层
+            # 注意：输入 x 是 [b, h, t]，这符合我们 BiMambaBlock 的接口设计
+            for layer in self.mamba_layers:
+                x = layer(x, x_mask)
+        else:
+            # 原始分支：调用 attentions.Encoder
+            x = self.encoder(x * x_mask, x_mask, g=None)
   
         # 在这里应用FiLM调制
         x_modulated = self.film_layer(x, g.squeeze(-1))
@@ -1113,6 +1181,7 @@ class SynthesizerTrn(nn.Module):
         norm_refenc=False,
         hps=None,
         sample_rate=None,
+        use_mamba=False,
         **kwargs
     ):
         super().__init__()
@@ -1159,6 +1228,7 @@ class SynthesizerTrn(nn.Module):
             gin_channels=self.enc_gin_channels,
             num_languages=num_languages,
             num_tones=num_tones,
+            use_mamba=use_mamba,
         )
         self.dec = Generator(
             inter_channels,
