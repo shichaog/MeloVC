@@ -22,7 +22,38 @@
 
 **[English Version](./README_en.md)** 
 
+## [v3] - 2026-01-15
+### 增加
+- 🆕 Mamba 文本编码器版本（实验性更新）
+本项目新增了一个 基于 Mamba（State Space Model）的文本编码器变体，用于替换原有的 Transformer Text Encoder。
+该版本在保持整体声学架构不变的前提下，引入 线性复杂度序列建模能力，以提升长文本与中英混合文本场景下的推理效率与稳定性。
 
+- ⚠️ 当前版本为 实验性（Experimental），在韵律和表达力上可能与 Transformer 版本存在差异。
+
+- 🔬 设计动机（Why Mamba）
+原始 Transformer 文本编码器在 TTS 场景中存在以下局限：
+* 序列长度平方复杂度（O(n²)）
+* 长文本或中英混合输入时显存占用较高
+* 推理阶段延迟不稳定
+
+- Mamba 的优势：
+* 线性时间复杂度（O(n)）
+* 更适合长序列建模
+* 推理显存占用更低
+
+对中英混合文本更加友好
+因此，本项目引入 Mamba 作为一种 可选的文本编码器实现。
+
+- 📦 Mamba 版本模型文件
+以下文件为 Mamba 文本编码器版本 所对应的配置与模型权重：
+
+模块	文件名
+配置文件	config_Mamba.json
+Generator	G_Mamba_30000.pth
+Discriminator	D_Mamba_30000.pth
+Duration Predictor	DUR_Mamba_30000.pth
+
+注意：Mamba 版本与 Transformer 版本 checkpoint 不可混用。
 
 ## [v2] - 2025-08-15
 ### 增加
@@ -45,36 +76,6 @@
         *   vctk     41小时
         *   私有数据 16小时
      
-* 🆕 Mamba 文本编码器版本（实验性更新）
-本项目新增了一个 基于 Mamba（State Space Model）的文本编码器变体，用于替换原有的 Transformer Text Encoder。
-该版本在保持整体声学架构不变的前提下，引入 线性复杂度序列建模能力，以提升长文本与中英混合文本场景下的推理效率与稳定性。
-
-⚠️ 当前版本为 实验性（Experimental），在韵律和表达力上可能与 Transformer 版本存在差异。
-
-🔬 设计动机（Why Mamba）
-原始 Transformer 文本编码器在 TTS 场景中存在以下局限：
-* 序列长度平方复杂度（O(n²)）
-* 长文本或中英混合输入时显存占用较高
-* 推理阶段延迟不稳定
-
-Mamba 的优势：
-* 线性时间复杂度（O(n)）
-* 更适合长序列建模
-* 推理显存占用更低
-
-对中英混合文本更加友好
-因此，本项目引入 Mamba 作为一种 可选的文本编码器实现。
-
-📦 Mamba 版本模型文件
-以下文件为 Mamba 文本编码器版本 所对应的配置与模型权重：
-
-模块	文件名
-配置文件	config_Mamba.json
-Generator	G_Mamba_30000.pth
-Discriminator	D_Mamba_30000.pth
-Duration Predictor	DUR_Mamba_30000.pth
-
-注意：Mamba 版本与 Transformer 版本 checkpoint 不可混用。
 
 # 🚀 快速开始
 
